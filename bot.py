@@ -121,8 +121,6 @@ class ApproveView(discord.ui.View):
             embed.add_field(name="Game ID", value=f"`{game_id}`", inline=True)
             embed.add_field(name="Офицер", value=interaction.user.mention, inline=True)
             embed.add_field(name="Мест занято", value=f"{active_count(data)}/{MAX_MEMBERS}", inline=True)
-        if comment:
-            embed.add_field(name="Комментарий", value=comment, inline=False)
             await log_ch.send(embed=embed)
 
         new_embed = discord.Embed(title="📨 Заявка в Blood Pact — ОДОБРЕНА", color=0x57F287)
