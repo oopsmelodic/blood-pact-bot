@@ -15,6 +15,7 @@ OFFICER_ROLE_ID  = int(os.environ.get("OFFICER_ROLE_ID", "0"))
 LOG_CHANNEL_ID   = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 APPLY_CHANNEL_ID = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
 MAX_MEMBERS      = 250
+REGISTRATION_OPEN = False  # управляется командами /bp_open и /bp_close
 # ─────────────────────────────────────────
 
 DATA_FILE = "players.json"
@@ -218,6 +219,10 @@ async def apply(interaction: discord.Interaction, game_id: str, comment: str = N
     data = load_data()
     discord_id = str(interaction.user.id)
 
+
+    if not REGISTRATION_OPEN:
+        await interaction.response.send_message("❌ Регистрация в Blood Pact сейчас закрыта. Следи за объявлениями.", ephemeral=True)
+        return
     if comment and len(comment) > 100:
         await interaction.response.send_message("❌ Комментарий слишком длинный — максимум 100 символов.", ephemeral=True)
         return
@@ -653,6 +658,50 @@ async def bp_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+
+# ─────────────────────────────────────────
+#  /bp_open — открыть регистрацию (офицеры)
+# ─────────────────────────────────────────
+@tree.command(name="bp_open", description="Открыть регистрацию в Blood Pact [офицеры]", guild=discord.Object(id=GUILD_ID))
+async def bp_open(interaction: discord.Interaction):
+    global REGISTRATION_OPEN
+    if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
+        await interaction.response.send_message("❌ Только офицеры могут использовать эту команду.", ephemeral=True)
+        return
+    if REGISTRATION_OPEN:
+        await interaction.response.send_message("⚠️ Регистрация уже открыта.", ephemeral=True)
+        return
+    REGISTRATION_OPEN = True
+    log_ch = bot.get_channel(LOG_CHANNEL_ID)
+    if log_ch:
+        embed = discord.Embed(title="✅ Регистрация открыта", color=0x57F287)
+        embed.add_field(name="Офицер", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Мест свободно", value=f"{MAX_MEMBERS - active_count(load_data())}/{MAX_MEMBERS}", inline=True)
+        await log_ch.send(embed=embed)
+    await interaction.response.send_message("✅ Регистрация в Blood Pact **открыта**. Игроки могут подавать заявки через `/apply`.", ephemeral=True)
+
+
+# ─────────────────────────────────────────
+#  /bp_close — закрыть регистрацию (офицеры)
+# ─────────────────────────────────────────
+@tree.command(name="bp_close", description="Закрыть регистрацию в Blood Pact [офицеры]", guild=discord.Object(id=GUILD_ID))
+async def bp_close(interaction: discord.Interaction):
+    global REGISTRATION_OPEN
+    if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
+        await interaction.response.send_message("❌ Только офицеры могут использовать эту команду.", ephemeral=True)
+        return
+    if not REGISTRATION_OPEN:
+        await interaction.response.send_message("⚠️ Регистрация уже закрыта.", ephemeral=True)
+        return
+    REGISTRATION_OPEN = False
+    log_ch = bot.get_channel(LOG_CHANNEL_ID)
+    if log_ch:
+        embed = discord.Embed(title="🔒 Регистрация закрыта", color=0xED4245)
+        embed.add_field(name="Офицер", value=interaction.user.mention, inline=True)
+        await log_ch.send(embed=embed)
+    await interaction.response.send_message("🔒 Регистрация в Blood Pact **закрыта**. Новые заявки не принимаются.", ephemeral=True)
+
+
 # ─────────────────────────────────────────
 #  СТАРТ
 # ─────────────────────────────────────────
@@ -664,3 +713,4 @@ async def on_ready():
     print(f"   Участников: {active_count(load_data())}/{MAX_MEMBERS}")
 
 bot.run(BOT_TOKEN)
+
