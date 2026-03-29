@@ -13,7 +13,9 @@ GUILD_ID         = int(os.environ.get("GUILD_ID", "0"))
 MEMBER_ROLE_ID   = int(os.environ.get("MEMBER_ROLE_ID", "0"))
 OFFICER_ROLE_ID  = int(os.environ.get("OFFICER_ROLE_ID", "0"))
 LOG_CHANNEL_ID   = int(os.environ.get("LOG_CHANNEL_ID", "0"))
-APPLY_CHANNEL_ID = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
+APPLY_CHANNEL_ID  = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
+STATUS_CHANNEL_ID = int(os.environ.get("STATUS_CHANNEL_ID", "0"))  # канал со статусом регистрации
+STATUS_MESSAGE_ID = None  # ID сообщения статуса, заполняется при старте
 MAX_MEMBERS      = 250
 REGISTRATION_OPEN = True  # управляется командами /bp_open и /bp_close
 # ─────────────────────────────────────────
@@ -32,6 +34,63 @@ def save_data(data):
 
 def active_count(data):
     return sum(1 for v in data.values() if not v.get("banned") and not v.get("left") and v.get("approved"))
+
+
+async def update_status():
+    """Обновляет или создаёт закреплённое сообщение статуса."""
+    global STATUS_MESSAGE_ID
+    if not STATUS_CHANNEL_ID:
+        return
+    ch = bot.get_channel(STATUS_CHANNEL_ID)
+    if not ch:
+        return
+
+    data = load_data()
+    active = active_count(data)
+    free = MAX_MEMBERS - active
+    status_text = "🟢 **ОТКРЫТА**" if REGISTRATION_OPEN else "🔴 **ЗАКРЫТА**"
+
+    embed = discord.Embed(title="⚔️ Blood Pact — Статус регистрации", color=0x57F287 if REGISTRATION_OPEN else 0xED4245)
+    embed.add_field(name="Регистрация", value=status_text, inline=False)
+    embed.add_field(name="Участников", value=f"{active}/{MAX_MEMBERS}", inline=True)
+    embed.add_field(name="Свободно мест", value=str(free), inline=True)
+    if REGISTRATION_OPEN and free > 0:
+        embed.add_field(name="Как вступить", value="Напиши `/apply` и укажи свой Game ID", inline=False)
+    elif not REGISTRATION_OPEN:
+        embed.add_field(name=" ", value="Регистрация временно приостановлена. Следи за объявлениями.", inline=False)
+    else:
+        embed.add_field(name=" ", value="Все места заняты. Следи за объявлениями.", inline=False)
+    embed.set_footer(text="Обновляется автоматически")
+    embed.timestamp = discord.utils.utcnow()
+
+    # если уже знаем ID сообщения — редактируем его
+    if STATUS_MESSAGE_ID:
+        try:
+            msg = await ch.fetch_message(STATUS_MESSAGE_ID)
+            await msg.edit(embed=embed)
+            return
+        except (discord.NotFound, discord.Forbidden):
+            STATUS_MESSAGE_ID = None
+
+    # ищем закреплённые сообщения бота
+    try:
+        pins = await ch.pins()
+        for msg in pins:
+            if msg.author == bot.user:
+                STATUS_MESSAGE_ID = msg.id
+                await msg.edit(embed=embed)
+                return
+    except discord.Forbidden:
+        pass
+
+    # создаём новое сообщение и закрепляем
+    try:
+        msg = await ch.send(embed=embed)
+        STATUS_MESSAGE_ID = msg.id
+        await msg.pin()
+    except discord.Forbidden:
+        pass
+
 
 intents = discord.Intents.default()
 intents.members = True
@@ -104,6 +163,7 @@ class ApproveView(discord.ui.View):
         role = guild.get_role(MEMBER_ROLE_ID)
         if member and role:
             await member.add_roles(role)
+        await update_status()
 
         try:
             if member:
@@ -293,6 +353,7 @@ async def leave(interaction: discord.Interaction):
     role = interaction.guild.get_role(MEMBER_ROLE_ID)
     if role and role in interaction.user.roles:
         await interaction.user.remove_roles(role)
+    await update_status()
 
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
@@ -677,6 +738,7 @@ async def bp_open(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ Регистрация уже открыта.", ephemeral=True)
         return
     REGISTRATION_OPEN = True
+    await update_status()
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
         embed = discord.Embed(title="✅ Регистрация открыта", color=0x57F287)
@@ -699,6 +761,7 @@ async def bp_close(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ Регистрация уже закрыта.", ephemeral=True)
         return
     REGISTRATION_OPEN = False
+    await update_status()
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
         embed = discord.Embed(title="🔒 Регистрация закрыта", color=0xED4245)
@@ -706,6 +769,21 @@ async def bp_close(interaction: discord.Interaction):
         await log_ch.send(embed=embed)
     await interaction.response.send_message("🔒 Регистрация в Blood Pact **закрыта**. Новые заявки не принимаются.", ephemeral=True)
 
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Удаляет обычные сообщения в канале статуса — оставляет только slash-команды."""
+    if message.author == bot.user:
+        return
+    if STATUS_CHANNEL_ID and message.channel.id == STATUS_CHANNEL_ID:
+        # slash-команды не создают обычных сообщений — удаляем всё что написано текстом
+        try:
+            await message.delete()
+        except discord.Forbidden:
+            pass
+        return
+    await bot.process_commands(message)
 
 # ─────────────────────────────────────────
 #  СТАРТ
@@ -716,6 +794,7 @@ async def on_ready():
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"✅ Blood Pact Bot запущен как {bot.user}")
     print(f"   Участников: {active_count(load_data())}/{MAX_MEMBERS}")
+    await update_status()
 
 bot.run(BOT_TOKEN)
 
