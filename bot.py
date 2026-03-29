@@ -15,7 +15,7 @@ OFFICER_ROLE_ID  = int(os.environ.get("OFFICER_ROLE_ID", "0"))
 LOG_CHANNEL_ID   = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 APPLY_CHANNEL_ID = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
 MAX_MEMBERS      = 250
-REGISTRATION_OPEN = False  # управляется командами /bp_open и /bp_close
+REGISTRATION_OPEN = True  # управляется командами /bp_open и /bp_close
 # ─────────────────────────────────────────
 
 DATA_FILE = "players.json"
@@ -641,7 +641,12 @@ async def bp_list(interaction: discord.Interaction):
         color=0x5865F2
     )
     if active:
-        lines = [f"`{i.get('game_id','?')}` <@{uid}>{'  ⚠️' * i.get('warnings',0)}" for uid, i in active[:25]]
+        lines = []
+        for uid, i in active[:25]:
+            w = i.get('warnings', 0)
+            comment = i.get('comment', '')
+            comment_str = f" — *{comment}*" if comment else ""
+            lines.append(f"`{i.get('game_id','?')}` <@{uid}>{'  ⚠️' * w}{comment_str}")
         if len(active) > 25:
             lines.append(f"... и ещё {len(active) - 25}")
         embed.add_field(name=f"✅ Активные ({len(active)})", value="\n".join(lines), inline=False)
