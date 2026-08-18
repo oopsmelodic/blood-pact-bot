@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+players.json
+players.db
+players.db-shm
+players.db-wal
+players_archive_*.json
+players_backup_*.json

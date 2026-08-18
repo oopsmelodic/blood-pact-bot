@@ -1,0 +1,125 @@
+# ⚔️ Blood Pact Bot — инструкция по запуску
+
+---
+
+## Как работает система заявок
+
+1. Игрок пишет `/apply GAME_ID` в любом канале
+2. В канале `#bp-applications` появляется карточка заявки с кнопками
+3. Офицер нажимает **✅ Одобрить** или **❌ Отклонить**
+4. Игрок получает уведомление в личку, роль выдаётся автоматически
+
+---
+
+## Шаг 1 — Создать бота в Discord
+
+1. Открой https://discord.com/developers/applications
+2. Нажми **New Application** → назови `Blood Pact Bot` → Create
+3. Слева выбери **Bot** → нажми **Add Bot**
+4. Нажми **Reset Token** → скопируй токен (сохрани, он покажется один раз!)
+5. Прокрути вниз, включи галочки:
+   - ✅ **Server Members Intent**
+   - ✅ **Message Content Intent**
+6. Слева выбери **OAuth2 → URL Generator**:
+   - Scopes: ✅ `bot` и ✅ `applications.commands`
+   - Bot Permissions: ✅ `Manage Roles`, ✅ `Send Messages`, ✅ `Read Message History`
+7. Скопируй ссылку внизу → открой в браузере → добавь бота на сервер
+
+---
+
+## Шаг 2 — Создай каналы и роли на сервере
+
+Создай два канала (если ещё нет):
+- `#bp-applications` — сюда приходят заявки с кнопками (только для офицеров)
+- `#bp-logs` — лог всех действий (только для офицеров)
+
+Создай роль `Blood Pact` для участников (если ещё нет).
+
+---
+
+## Шаг 3 — Собери ID
+
+Включи Developer Mode: **Settings → Advanced → Developer Mode ✅**
+
+| Что нажать правой кнопкой | Что скопировать |
+|---|---|
+| Название сервера | Copy Server ID → GUILD_ID |
+| Роль "Blood Pact" | Copy Role ID → MEMBER_ROLE_ID |
+| Роль "Офицер" | Copy Role ID → OFFICER_ROLE_ID |
+| Канал #bp-logs | Copy Channel ID → LOG_CHANNEL_ID |
+| Канал #bp-applications | Copy Channel ID → APPLY_CHANNEL_ID |
+
+---
+
+## Шаг 4 — Хостинг на Railway
+
+### 4.1 Загрузи файлы на GitHub
+
+1. Зайди на https://github.com → зарегистрируйся
+2. Нажми **New repository** → назови `blood-pact-bot` → Create
+3. Нажми **uploading an existing file** → загрузи `bot.py` и `requirements.txt`
+4. Нажми **Commit changes**
+
+### 4.2 Задеплой на Railway
+
+1. Зайди на https://railway.app → **Login with GitHub**
+2. Нажми **New Project → Deploy from GitHub repo**
+3. Выбери `blood-pact-bot`
+
+### 4.3 Добавь переменные окружения
+
+В Railway: вкладка **Variables** → добавь каждую строку:
+
+| Имя | Значение |
+|---|---|
+| BOT_TOKEN | токен из шага 1 |
+| GUILD_ID | ID сервера |
+| MEMBER_ROLE_ID | ID роли участника |
+| OFFICER_ROLE_ID | ID роли офицера |
+| LOG_CHANNEL_ID | ID канала #bp-logs |
+| APPLY_CHANNEL_ID | ID канала #bp-applications |
+| STATUS_CHANNEL_ID | ID канала со статусом регистрации |
+
+### 4.4 Подключи постоянную базу игроков
+
+Внутри сервиса бота открой **Volumes → Add Volume** и укажи путь подключения:
+
+```text
+/app/data
+```
+
+Railway автоматически передаст путь в `RAILWAY_VOLUME_MOUNT_PATH`. Бот создаст на этом диске SQLite-базу `players.db`. Она хранится отдельно от кода и не исчезает при обычном деплое.
+
+На бесплатном плане доступен один Volume размером до 0,5 ГБ — для базы до 250 игроков этого более чем достаточно. Основной расход бесплатного кредита создаёт работающий бот, а не база.
+
+### 4.5 Запусти
+
+**Settings → Start Command:**
+```
+python bot.py
+```
+Нажми **Deploy** — через ~1 минуту в логах появится `✅ Blood Pact Bot запущен`.
+
+---
+
+## Команды бота
+
+| Команда | Кто | Описание |
+|---|---|---|
+| `/apply GAME_ID` | Любой | Подать заявку на вступление |
+| `/leave` | Участники | Покинуть Blood Pact, освободить место |
+| `/lookup @user` | Офицеры | Карточка игрока с историей |
+| `/lookup game_id:XXXX` | Офицеры | Найти по игровому ID |
+| `/warn @user причина` | Офицеры | Предупреждение + лог + уведомление в личку |
+| `/bp_ban @user причина` | Офицеры | Бан, снятие роли + лог + уведомление в личку |
+| `/bp_list` | Офицеры | Все участники: активные / ожидающие / ушедшие / забаненные |
+| `/bp_export` | Офицеры | Скачать JSON-копию базы игроков через Discord |
+
+---
+
+## Заметки
+
+- Лимит мест: **250** (меняется в строке `MAX_MEMBERS = 250` в bot.py)
+- Дублирующийся Game ID заблокирован — один ID на одного игрока
+- Забаненный игрок не может подать новую заявку
+- Ушедший игрок может вернуться через `/apply`
