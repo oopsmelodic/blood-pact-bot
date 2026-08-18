@@ -3,7 +3,17 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
+import io
 from datetime import datetime
+from storage import (
+    create_archive,
+    get_setting,
+    init_storage,
+    load_data,
+    save_data,
+    set_setting,
+    storage_description,
+)
 
 # ─────────────────────────────────────────
 #  НАСТРОЙКИ
@@ -19,18 +29,6 @@ STATUS_MESSAGE_ID = None  # ID сообщения статуса, заполня
 MAX_MEMBERS      = 250
 REGISTRATION_OPEN = True  # управляется командами /bp_open и /bp_close
 # ─────────────────────────────────────────
-
-DATA_FILE = "players.json"
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def active_count(data):
     return sum(1 for v in data.values() if not v.get("banned") and not v.get("left") and v.get("approved"))
@@ -518,11 +516,7 @@ async def bp_reset(interaction: discord.Interaction):
 
     # сохраняем архив перед сбросом
     archive_file = f"players_archive_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.json"
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            archive_data = f.read()
-        with open(archive_file, "w", encoding="utf-8") as f:
-            f.write(archive_data)
+    create_archive(archive_file, data)
 
     # очищаем базу
     save_data({})
@@ -724,6 +718,26 @@ async def bp_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ─────────────────────────────────────────
+#  /bp_export — резервная копия базы (офицеры)
+# ─────────────────────────────────────────
+@tree.command(name="bp_export", description="Скачать резервную копию базы игроков [офицеры]", guild=discord.Object(id=GUILD_ID))
+async def bp_export(interaction: discord.Interaction):
+    if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
+        await interaction.response.send_message("❌ Только офицеры.", ephemeral=True)
+        return
+
+    data = load_data()
+    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"players_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.json"
+    backup = discord.File(io.BytesIO(payload), filename=filename)
+    await interaction.response.send_message(
+        f"✅ Резервная копия базы: **{len(data)}** записей.",
+        file=backup,
+        ephemeral=True,
+    )
+
+
 
 # ─────────────────────────────────────────
 #  /bp_open — открыть регистрацию (офицеры)
@@ -738,6 +752,7 @@ async def bp_open(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ Регистрация уже открыта.", ephemeral=True)
         return
     REGISTRATION_OPEN = True
+    set_setting("registration_open", True)
     await update_status()
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
@@ -761,6 +776,7 @@ async def bp_close(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ Регистрация уже закрыта.", ephemeral=True)
         return
     REGISTRATION_OPEN = False
+    set_setting("registration_open", False)
     await update_status()
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
@@ -790,11 +806,14 @@ async def on_message(message: discord.Message):
 # ─────────────────────────────────────────
 @bot.event
 async def on_ready():
+    global REGISTRATION_OPEN
+    init_storage()
+    REGISTRATION_OPEN = bool(get_setting("registration_open", True))
     bot.add_view(ApproveView())
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"✅ Blood Pact Bot запущен как {bot.user}")
+    print(f"   Хранилище: {storage_description()}")
     print(f"   Участников: {active_count(load_data())}/{MAX_MEMBERS}")
     await update_status()
 
 bot.run(BOT_TOKEN)
-
