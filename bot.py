@@ -678,6 +678,137 @@ async def bp_ban(interaction: discord.Interaction, member: discord.Member, reaso
 # ─────────────────────────────────────────
 #  /bp_list
 # ─────────────────────────────────────────
+class BPListView(discord.ui.View):
+    PAGE_SIZE = 20
+
+    def __init__(self, officer_id: int, groups: dict):
+        super().__init__(timeout=300)
+        self.officer_id = officer_id
+        self.groups = groups
+        self.category = "active"
+        self.page = 0
+        self._refresh_buttons()
+
+    def _page_count(self):
+        item_count = len(self.groups[self.category])
+        return max(1, (item_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+
+    def _refresh_buttons(self):
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= self._page_count() - 1
+
+        category_buttons = {
+            "active": self.show_active,
+            "pending": self.show_pending,
+            "left": self.show_left,
+            "banned": self.show_banned,
+        }
+        for category, button in category_buttons.items():
+            button.disabled = category == self.category
+            button.style = (
+                discord.ButtonStyle.primary
+                if category == self.category
+                else discord.ButtonStyle.secondary
+            )
+
+    def make_embed(self):
+        labels = {
+            "active": ("✅ Активные", 0x57F287),
+            "pending": ("⏳ Ожидают", 0x5865F2),
+            "left": ("👋 Покинули", 0xFEE75C),
+            "banned": ("🔨 Забаненные", 0xED4245),
+        }
+        title, color = labels[self.category]
+        items = self.groups[self.category]
+        page_count = self._page_count()
+        start = self.page * self.PAGE_SIZE
+        page_items = items[start:start + self.PAGE_SIZE]
+
+        lines = []
+        for number, (uid, info) in enumerate(page_items, start=start + 1):
+            suffix = ""
+            if self.category == "active":
+                warnings = info.get("warnings", 0)
+                comment = info.get("comment", "")
+                if warnings:
+                    suffix += f"  {'⚠️' * warnings}"
+                if comment:
+                    suffix += f" — *{comment}*"
+            elif self.category == "left" and info.get("removed_by_officer"):
+                suffix = "  🗑"
+            lines.append(
+                f"**{number}.** `{info.get('game_id', '?')}` <@{uid}>{suffix}"
+            )
+
+        active_count_value = len(self.groups["active"])
+        summary = (
+            f"Мест занято: **{active_count_value}/{MAX_MEMBERS}** · "
+            f"Свободно: **{MAX_MEMBERS - active_count_value}**\n"
+            f"Активные: **{active_count_value}** · "
+            f"Ожидают: **{len(self.groups['pending'])}** · "
+            f"Покинули: **{len(self.groups['left'])}** · "
+            f"Бан: **{len(self.groups['banned'])}**"
+        )
+        embed = discord.Embed(
+            title=f"⚔️ Blood Pact — {title}",
+            description=f"{summary}\n\n" + ("\n".join(lines) if lines else "*Список пуст.*"),
+            color=color,
+        )
+        embed.set_footer(
+            text=f"Страница {self.page + 1}/{page_count} · по {self.PAGE_SIZE} игроков"
+        )
+        return embed
+
+    async def _switch_category(self, interaction: discord.Interaction, category: str):
+        if interaction.user.id != self.officer_id:
+            await interaction.response.send_message(
+                "❌ Эта панель открыта другим офицером.", ephemeral=True
+            )
+            return
+        self.category = category
+        self.page = 0
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Активные", style=discord.ButtonStyle.primary, row=0)
+    async def show_active(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch_category(interaction, "active")
+
+    @discord.ui.button(label="Ожидают", style=discord.ButtonStyle.secondary, row=0)
+    async def show_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch_category(interaction, "pending")
+
+    @discord.ui.button(label="Покинули", style=discord.ButtonStyle.secondary, row=0)
+    async def show_left(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch_category(interaction, "left")
+
+    @discord.ui.button(label="Бан", style=discord.ButtonStyle.secondary, row=0)
+    async def show_banned(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch_category(interaction, "banned")
+
+    @discord.ui.button(label="◀ Назад", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.officer_id:
+            await interaction.response.send_message(
+                "❌ Эта панель открыта другим офицером.", ephemeral=True
+            )
+            return
+        self.page = max(0, self.page - 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="Вперёд ▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.officer_id:
+            await interaction.response.send_message(
+                "❌ Эта панель открыта другим офицером.", ephemeral=True
+            )
+            return
+        self.page = min(self._page_count() - 1, self.page + 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+
 @tree.command(name="bp_list", description="Список участников [офицеры]", guild=discord.Object(id=GUILD_ID))
 async def bp_list(interaction: discord.Interaction):
     if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
@@ -685,37 +816,33 @@ async def bp_list(interaction: discord.Interaction):
         return
 
     data = load_data()
-    active  = [(uid, i) for uid, i in data.items() if i.get("approved") and not i.get("banned") and not i.get("left")]
-    pending = [(uid, i) for uid, i in data.items() if not i.get("approved") and not i.get("banned")]
-    left    = [(uid, i) for uid, i in data.items() if i.get("left") and not i.get("banned")]
-    banned  = [(uid, i) for uid, i in data.items() if i.get("banned")]
+    groups = {
+        "active": [
+            (uid, info) for uid, info in data.items()
+            if info.get("approved") and not info.get("banned") and not info.get("left")
+        ],
+        "pending": [
+            (uid, info) for uid, info in data.items()
+            if not info.get("approved") and not info.get("banned")
+        ],
+        "left": [
+            (uid, info) for uid, info in data.items()
+            if info.get("left") and not info.get("banned")
+        ],
+        "banned": [
+            (uid, info) for uid, info in data.items() if info.get("banned")
+        ],
+    }
+    for items in groups.values():
+        items.sort(
+            key=lambda item: item[1].get("joined", item[1].get("applied", "")),
+            reverse=True,
+        )
 
-    embed = discord.Embed(
-        title="⚔️ Blood Pact — участники",
-        description=f"Мест занято: **{len(active)}/{MAX_MEMBERS}** | Свободно: **{MAX_MEMBERS - len(active)}**",
-        color=0x5865F2
+    view = BPListView(interaction.user.id, groups)
+    await interaction.response.send_message(
+        embed=view.make_embed(), view=view, ephemeral=True
     )
-    if active:
-        lines = []
-        for uid, i in active[:25]:
-            w = i.get('warnings', 0)
-            comment = i.get('comment', '')
-            comment_str = f" — *{comment}*" if comment else ""
-            lines.append(f"`{i.get('game_id','?')}` <@{uid}>{'  ⚠️' * w}{comment_str}")
-        if len(active) > 25:
-            lines.append(f"... и ещё {len(active) - 25}")
-        embed.add_field(name=f"✅ Активные ({len(active)})", value="\n".join(lines), inline=False)
-    if pending:
-        lines = [f"`{i.get('game_id','?')}` <@{uid}>" for uid, i in pending[:10]]
-        embed.add_field(name=f"⏳ Ожидают ({len(pending)})", value="\n".join(lines), inline=False)
-    if left:
-        lines = [f"`{i.get('game_id','?')}` <@{uid}>{'  🗑' if i.get('removed_by_officer') else ''}" for uid, i in left[:10]]
-        embed.add_field(name=f"👋 Покинули ({len(left)})", value="\n".join(lines), inline=False)
-    if banned:
-        lines = [f"`{i.get('game_id','?')}` <@{uid}>" for uid, i in banned[:10]]
-        embed.add_field(name=f"🔨 Забаненные ({len(banned)})", value="\n".join(lines), inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ─────────────────────────────────────────
