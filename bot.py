@@ -150,6 +150,7 @@ class ApproveView(discord.ui.View):
             "joined": datetime.utcnow().isoformat(),
             "warnings": data.get(uid, {}).get("warnings", 0),
             "notes": data.get(uid, {}).get("notes", []),
+            "invited": data.get(uid, {}).get("invited", False),
             "approved": True,
             "banned": False,
             "left": False
@@ -306,6 +307,7 @@ async def apply(interaction: discord.Interaction, game_id: str, comment: str = N
         "approved": False,
         "banned": False,
         "left": False,
+        "invited": False,
         "warnings": 0,
         "comment": comment or "",
         "notes": []
@@ -711,6 +713,32 @@ class BPListView(discord.ui.View):
                 else discord.ButtonStyle.secondary
             )
 
+        items = self.groups[self.category]
+        start = self.page * self.PAGE_SIZE
+        page_items = items[start:start + self.PAGE_SIZE]
+        if self.category == "active" and page_items:
+            self.invite_toggle.disabled = False
+            self.invite_toggle.placeholder = "Изменить отметку игрового инвайта"
+            self.invite_toggle.options = [
+                discord.SelectOption(
+                    label=(str(info.get("game_id", "?")).strip() or "Без Game ID")[:100],
+                    value=uid,
+                    description=(
+                        "Заинвайчен — нажмите, чтобы снять отметку"
+                        if info.get("invited")
+                        else "Не заинвайчен — нажмите, чтобы отметить"
+                    ),
+                    emoji="✅" if info.get("invited") else "❌",
+                )
+                for uid, info in page_items
+            ]
+        else:
+            self.invite_toggle.disabled = True
+            self.invite_toggle.placeholder = "Отметка инвайта доступна для активных"
+            self.invite_toggle.options = [
+                discord.SelectOption(label="Нет активных игроков", value="none")
+            ]
+
     def make_embed(self):
         labels = {
             "active": ("✅ Активные", 0x57F287),
@@ -728,6 +756,9 @@ class BPListView(discord.ui.View):
         for number, (uid, info) in enumerate(page_items, start=start + 1):
             suffix = ""
             if self.category == "active":
+                invite_status = (
+                    "✅ заинвайчен" if info.get("invited") else "❌ не заинвайчен"
+                )
                 warnings = info.get("warnings", 0)
                 comment = info.get("comment", "")
                 if warnings:
@@ -735,9 +766,15 @@ class BPListView(discord.ui.View):
                 if comment:
                     suffix += f" — *{comment}*"
             elif self.category == "left" and info.get("removed_by_officer"):
+                invite_status = None
                 suffix = "  🗑"
+            else:
+                invite_status = None
+            status = f" · {invite_status}" if invite_status else ""
+            # Game ID стоит в конце строки: при клике Discord не захватывает
+            # следующий за inline-code пробел в копируемый текст.
             lines.append(
-                f"**{number}.** `{info.get('game_id', '?')}` <@{uid}>{suffix}"
+                f"**{number}.** <@{uid}>{status}{suffix} — ID: `{info.get('game_id', '?')}`"
             )
 
         active_count_value = len(self.groups["active"])
@@ -767,6 +804,48 @@ class BPListView(discord.ui.View):
             return
         self.category = category
         self.page = 0
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.select(
+        placeholder="Изменить отметку игрового инвайта",
+        options=[discord.SelectOption(label="Нет активных игроков", value="none")],
+        min_values=1,
+        max_values=1,
+        row=2,
+    )
+    async def invite_toggle(
+        self, interaction: discord.Interaction, select: discord.ui.Select
+    ):
+        if interaction.user.id != self.officer_id:
+            await interaction.response.send_message(
+                "❌ Эта панель открыта другим офицером.", ephemeral=True
+            )
+            return
+        if self.category != "active" or select.values[0] == "none":
+            await interaction.response.send_message(
+                "❌ Отметку можно менять только у активных игроков.", ephemeral=True
+            )
+            return
+
+        uid = select.values[0]
+        data = load_data()
+        if uid not in data:
+            await interaction.response.send_message(
+                "❌ Игрок больше не найден в базе. Открой `/bp_list` заново.",
+                ephemeral=True,
+            )
+            return
+
+        invited = not data[uid].get("invited", False)
+        data[uid]["invited"] = invited
+        save_data(data)
+
+        for item_uid, info in self.groups["active"]:
+            if item_uid == uid:
+                info["invited"] = invited
+                break
+
         self._refresh_buttons()
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
