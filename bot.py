@@ -34,6 +34,21 @@ def active_count(data):
     return sum(1 for v in data.values() if not v.get("banned") and not v.get("left") and v.get("approved"))
 
 
+def blacklist_only_record(info):
+    """Оставляет только постоянную отметку ЧС, без статуса заявки или участника."""
+    return {
+        "discord_tag": info.get("discord_tag", ""),
+        "notes": info.get("notes", []),
+        "blacklisted": True,
+        "blacklist_reason": info.get("blacklist_reason", ""),
+        "blacklisted_at": info.get("blacklisted_at", ""),
+        "blacklisted_by": info.get("blacklisted_by", ""),
+        "approved": False,
+        "banned": False,
+        "left": False,
+    }
+
+
 async def update_status():
     """Обновляет или создаёт закреплённое сообщение статуса."""
     global STATUS_MESSAGE_ID
@@ -136,6 +151,12 @@ class ApproveView(discord.ui.View):
         data = load_data()
         uid = str(applicant_id)
 
+        if data.get(uid, {}).get("banned"):
+            await interaction.response.send_message(
+                "❌ Эту заявку нельзя одобрить.", ephemeral=True
+            )
+            return
+
         if data.get(uid, {}).get("approved"):
             await interaction.response.send_message("⚠️ Этот игрок уже одобрен.", ephemeral=True)
             return
@@ -144,17 +165,18 @@ class ApproveView(discord.ui.View):
             await interaction.response.send_message(f"❌ Нет свободных мест ({MAX_MEMBERS}/{MAX_MEMBERS}).", ephemeral=True)
             return
 
-        data[uid] = {
+        record = data.setdefault(uid, {})
+        record.update({
             "game_id": game_id,
-            "discord_tag": data.get(uid, {}).get("discord_tag", ""),
+            "discord_tag": record.get("discord_tag", ""),
             "joined": datetime.utcnow().isoformat(),
-            "warnings": data.get(uid, {}).get("warnings", 0),
-            "notes": data.get(uid, {}).get("notes", []),
-            "invited": data.get(uid, {}).get("invited", False),
+            "warnings": record.get("warnings", 0),
+            "notes": record.get("notes", []),
+            "invited": record.get("invited", False),
             "approved": True,
             "banned": False,
             "left": False
-        }
+        })
         save_data(data)
 
         guild = interaction.guild
@@ -211,7 +233,10 @@ class ApproveView(discord.ui.View):
             return
 
         if uid in data:
-            del data[uid]
+            if data[uid].get("blacklisted"):
+                data[uid] = blacklist_only_record(data[uid])
+            else:
+                del data[uid]
             save_data(data)
 
         guild = interaction.guild
@@ -287,12 +312,12 @@ async def apply(interaction: discord.Interaction, game_id: str, comment: str = N
         return
 
     if discord_id in data and data[discord_id].get("banned"):
-        await interaction.response.send_message("❌ Ты забанен и не можешешь подать заявку.", ephemeral=True)
+        await interaction.response.send_message("❌ Ты забанен и не можешь подать заявку.", ephemeral=True)
         return
     if discord_id in data and data[discord_id].get("approved") and not data[discord_id].get("left"):
         await interaction.response.send_message("❌ Ты уже являешься участником Blood Pact.", ephemeral=True)
         return
-    if discord_id in data and not data[discord_id].get("approved"):
+    if discord_id in data and data[discord_id].get("applied") and not data[discord_id].get("approved"):
         await interaction.response.send_message("⏳ Твоя заявка уже на рассмотрении.", ephemeral=True)
         return
     for uid, info in data.items():
@@ -300,7 +325,8 @@ async def apply(interaction: discord.Interaction, game_id: str, comment: str = N
             await interaction.response.send_message(f"❌ Game ID `{game_id}` уже используется другим участником.", ephemeral=True)
             return
 
-    data[discord_id] = {
+    record = data.setdefault(discord_id, {})
+    record.update({
         "game_id": game_id,
         "discord_tag": str(interaction.user),
         "applied": datetime.utcnow().isoformat(),
@@ -310,8 +336,8 @@ async def apply(interaction: discord.Interaction, game_id: str, comment: str = N
         "invited": False,
         "warnings": 0,
         "comment": comment or "",
-        "notes": []
-    }
+        "notes": record.get("notes", [])
+    })
     save_data(data)
 
     apply_ch = bot.get_channel(APPLY_CHANNEL_ID)
@@ -438,7 +464,10 @@ async def bp_clear_left(interaction: discord.Interaction):
         return
 
     data = load_data()
-    left_players = [(uid, info) for uid, info in data.items() if info.get("left") and not info.get("banned")]
+    left_players = [
+        (uid, info) for uid, info in data.items()
+        if info.get("left") and not info.get("banned") and not info.get("blacklisted")
+    ]
 
     if not left_players:
         await interaction.response.send_message("✅ Нет игроков которых нужно очистить — все активны.", ephemeral=True)
@@ -488,12 +517,18 @@ async def bp_reset(interaction: discord.Interaction):
         return
 
     data = load_data()
-    total = len(data)
+    blacklisted = {
+        uid: blacklist_only_record(info)
+        for uid, info in data.items()
+        if info.get("blacklisted")
+    }
+    total = len(data) - len(blacklisted)
 
     view = ConfirmView(action="reset", officer_id=interaction.user.id)
     await interaction.response.send_message(
         f"⚠️ **ПОЛНЫЙ СБРОС BLOOD PACT**\n\n"
-        f"Это удалит **всех {total} игроков** из базы и снимет роль со всех участников на сервере.\n"
+        f"Это удалит **{total} игроков** из базы и снимет роль со всех участников на сервере.\n"
+        f"Записи чёрного списка (**{len(blacklisted)}**) будут сохранены.\n"
         f"Действие необратимо. Используй только в начале нового сезона.\n\n"
         f"Подтверди:",
         view=view,
@@ -520,8 +555,8 @@ async def bp_reset(interaction: discord.Interaction):
     archive_file = f"players_archive_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.json"
     create_archive(archive_file, data)
 
-    # очищаем базу
-    save_data({})
+    # очищаем сезонные данные, но сохраняем постоянный чёрный список
+    save_data(blacklisted)
 
     log_ch = bot.get_channel(LOG_CHANNEL_ID)
     if log_ch:
@@ -534,6 +569,7 @@ async def bp_reset(interaction: discord.Interaction):
 
     await interaction.followup.send(
         f"✅ Blood Pact сброшен. Удалено **{total}** записей, снято ролей: **{removed_roles}**.\n"
+        f"В чёрном списке сохранено: **{len(blacklisted)}**.\n"
         f"Архив сохранён в `{archive_file}`.",
         ephemeral=True
     )
@@ -591,6 +627,12 @@ async def lookup(interaction: discord.Interaction, member: discord.Member = None
     embed.add_field(name="Статус", value=status, inline=True)
     embed.add_field(name="Предупреждения", value=f"{'⚠️' * warnings} {warnings}", inline=True)
     embed.add_field(name="В лиге с", value=found.get("joined", "н/д")[:10], inline=True)
+    if found.get("blacklisted"):
+        embed.add_field(
+            name="⛔ Чёрный список",
+            value=found.get("blacklist_reason", "Причина не указана"),
+            inline=False,
+        )
     embed.add_field(name="История", value=notes_text, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -678,6 +720,80 @@ async def bp_ban(interaction: discord.Interaction, member: discord.Member, reaso
 
 
 # ─────────────────────────────────────────
+#  /bp_blacklist — тихо добавить Discord ID в чёрный список
+# ─────────────────────────────────────────
+@tree.command(
+    name="bp_blacklist",
+    description="Добавить Discord ID в чёрный список [офицеры]",
+    guild=discord.Object(id=GUILD_ID),
+)
+@app_commands.describe(user_id="Discord ID пользователя", reason="Причина")
+async def bp_blacklist(
+    interaction: discord.Interaction, user_id: str, reason: str
+):
+    if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
+        await interaction.response.send_message("❌ Только офицеры.", ephemeral=True)
+        return
+
+    uid = user_id.strip().strip("<@!>")
+    if not uid.isdigit() or int(uid) <= 0:
+        await interaction.response.send_message(
+            "❌ Укажи корректный Discord ID.", ephemeral=True
+        )
+        return
+
+    reason = reason.strip()
+    if not reason:
+        await interaction.response.send_message(
+            "❌ Причина не может быть пустой.", ephemeral=True
+        )
+        return
+    if len(reason) > 1000:
+        await interaction.response.send_message(
+            "❌ Причина слишком длинная — максимум 1000 символов.", ephemeral=True
+        )
+        return
+
+    data = load_data()
+    record = data.setdefault(uid, {"notes": []})
+    member = interaction.guild.get_member(int(uid))
+    if member:
+        record["discord_tag"] = str(member)
+
+    now = datetime.utcnow()
+    note = (
+        f"[{now.strftime('%Y-%m-%d')}] ⛔ ЧЁРНЫЙ СПИСОК "
+        f"от {interaction.user}: {reason}"
+    )
+    record.setdefault("notes", []).append(note)
+    record.update(
+        {
+            "blacklisted": True,
+            "blacklist_reason": reason,
+            "blacklisted_at": now.isoformat(),
+            "blacklisted_by": str(interaction.user.id),
+        }
+    )
+    save_data(data)
+    await update_status()
+
+    log_ch = bot.get_channel(LOG_CHANNEL_ID)
+    if log_ch:
+        embed = discord.Embed(title="⛔ Добавлен в чёрный список", color=0x2B2D31)
+        embed.add_field(name="Discord ID", value=f"`{uid}`", inline=True)
+        embed.add_field(name="Пользователь", value=f"<@{uid}>", inline=True)
+        embed.add_field(name="Офицер", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Причина", value=reason, inline=False)
+        await log_ch.send(embed=embed)
+
+    # Намеренно не отправляем пользователю личное сообщение.
+    await interaction.response.send_message(
+        f"⛔ Discord ID `{uid}` сохранён в чёрном списке без уведомления пользователя.",
+        ephemeral=True,
+    )
+
+
+# ─────────────────────────────────────────
 #  /bp_list
 # ─────────────────────────────────────────
 class BPListView(discord.ui.View):
@@ -744,7 +860,7 @@ class BPListView(discord.ui.View):
             "active": ("✅ Активные", 0x57F287),
             "pending": ("⏳ Ожидают", 0x5865F2),
             "left": ("👋 Покинули", 0xFEE75C),
-            "banned": ("🔨 Забаненные", 0xED4245),
+            "banned": ("🔨 Бан / ⛔ Чёрный список", 0xED4245),
         }
         title, color = labels[self.category]
         items = self.groups[self.category]
@@ -768,6 +884,10 @@ class BPListView(discord.ui.View):
             elif self.category == "left" and info.get("removed_by_officer"):
                 invite_status = None
                 suffix = "  🗑"
+            elif self.category == "banned" and info.get("blacklisted"):
+                invite_status = None
+                reason = str(info.get("blacklist_reason", "причина не указана"))
+                suffix = f"  ⛔ — *{reason[:120]}*"
             else:
                 invite_status = None
             status = f" · {invite_status}" if invite_status else ""
@@ -784,7 +904,7 @@ class BPListView(discord.ui.View):
             f"Активные: **{active_count_value}** · "
             f"Ожидают: **{len(self.groups['pending'])}** · "
             f"Покинули: **{len(self.groups['left'])}** · "
-            f"Бан: **{len(self.groups['banned'])}**"
+            f"Бан / ЧС: **{len(self.groups['banned'])}**"
         )
         embed = discord.Embed(
             title=f"⚔️ Blood Pact — {title}",
@@ -861,7 +981,7 @@ class BPListView(discord.ui.View):
     async def show_left(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_category(interaction, "left")
 
-    @discord.ui.button(label="Бан", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Бан / ЧС", style=discord.ButtonStyle.secondary, row=0)
     async def show_banned(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_category(interaction, "banned")
 
@@ -909,7 +1029,8 @@ async def bp_list(interaction: discord.Interaction):
             if info.get("left") and not info.get("banned")
         ],
         "banned": [
-            (uid, info) for uid, info in data.items() if info.get("banned")
+            (uid, info) for uid, info in data.items()
+            if info.get("banned") or info.get("blacklisted")
         ],
     }
     for items in groups.values():
