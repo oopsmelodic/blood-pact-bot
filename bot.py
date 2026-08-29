@@ -26,7 +26,7 @@ LOG_CHANNEL_ID   = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 APPLY_CHANNEL_ID  = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
 STATUS_CHANNEL_ID = int(os.environ.get("STATUS_CHANNEL_ID", "0"))  # канал со статусом регистрации
 STATUS_MESSAGE_ID = None  # ID сообщения статуса, заполняется при старте
-MAX_MEMBERS      = 250
+MAX_MEMBERS      = 1000
 REGISTRATION_OPEN = True  # управляется командами /bp_open и /bp_close
 # ─────────────────────────────────────────
 
