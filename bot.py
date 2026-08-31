@@ -151,6 +151,12 @@ class ApproveView(discord.ui.View):
         data = load_data()
         uid = str(applicant_id)
 
+        if uid not in data or not data[uid].get("applied"):
+            await interaction.response.send_message(
+                "⚠️ Эта заявка уже закрыта.", ephemeral=True
+            )
+            return
+
         if data.get(uid, {}).get("banned"):
             await interaction.response.send_message(
                 "❌ Эту заявку нельзя одобрить.", ephemeral=True
@@ -227,6 +233,12 @@ class ApproveView(discord.ui.View):
 
         data = load_data()
         uid = str(applicant_id)
+
+        if uid not in data or not data[uid].get("applied"):
+            await interaction.response.send_message(
+                "⚠️ Эта заявка уже закрыта.", ephemeral=True
+            )
+            return
 
         if data.get(uid, {}).get("approved"):
             await interaction.response.send_message("⚠️ Этот игрок уже был одобрен ранее.", ephemeral=True)
@@ -508,8 +520,132 @@ async def bp_clear_left(interaction: discord.Interaction):
 
 
 # ─────────────────────────────────────────
-#  /bp_reset — полный сброс лиги (офицеры)
+#  /bp_close_applications — закрыть ожидающие заявки (офицеры)
 # ─────────────────────────────────────────
+@tree.command(
+    name="bp_close_applications",
+    description="Закрыть все заявки на рассмотрении [офицеры]",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def bp_close_applications(interaction: discord.Interaction):
+    if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
+        await interaction.response.send_message(
+            "❌ Только офицеры могут использовать эту команду.", ephemeral=True
+        )
+        return
+
+    data = load_data()
+    pending_ids = {
+        uid
+        for uid, info in data.items()
+        if info.get("applied")
+        and not info.get("approved")
+        and not info.get("banned")
+        and not info.get("left")
+    }
+    if not pending_ids:
+        await interaction.response.send_message(
+            "✅ Нет активных заявок на рассмотрении.", ephemeral=True
+        )
+        return
+
+    view = ConfirmView(action="close_applications", officer_id=interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ Будут закрыты все заявки на рассмотрении: **{len(pending_ids)}**.\n"
+        "Одобренные участники и записи чёрного списка не изменятся.\n\n"
+        "Подтверди действие:",
+        view=view,
+        ephemeral=True,
+    )
+    await view.wait()
+    if not view.confirmed:
+        return
+
+    # Перечитываем базу: пока офицер подтверждал, часть заявок могли обработать.
+    data = load_data()
+    pending_ids = {
+        uid
+        for uid, info in data.items()
+        if info.get("applied")
+        and not info.get("approved")
+        and not info.get("banned")
+        and not info.get("left")
+    }
+    if not pending_ids:
+        await interaction.followup.send(
+            "✅ Активных заявок больше нет.", ephemeral=True
+        )
+        return
+
+    for uid in pending_ids:
+        if data[uid].get("blacklisted"):
+            data[uid] = blacklist_only_record(data[uid])
+        else:
+            del data[uid]
+    save_data(data)
+
+    # Закрываем карточки. Проверка в обработчиках кнопок также защищает карточки,
+    # которые Discord не разрешил отредактировать.
+    cards_closed = 0
+    apply_ch = bot.get_channel(APPLY_CHANNEL_ID)
+    remaining_ids = set(pending_ids)
+    if apply_ch:
+        try:
+            async for message in apply_ch.history(limit=None):
+                if not remaining_ids:
+                    break
+                if not message.embeds:
+                    continue
+                source_embed = message.embeds[0]
+                if source_embed.title != "📨 Новая заявка в Blood Pact":
+                    continue
+                applicant_id = None
+                for field in source_embed.fields:
+                    if field.name == "Игрок":
+                        applicant_id = field.value.strip("<@>")
+                        break
+                if applicant_id not in remaining_ids:
+                    continue
+
+                closed_embed = discord.Embed(
+                    title="📨 Заявка в Blood Pact — ЗАКРЫТА", color=0x747F8D
+                )
+                for field in source_embed.fields:
+                    closed_embed.add_field(
+                        name=field.name, value=field.value, inline=field.inline
+                    )
+                closed_embed.set_footer(
+                    text=(
+                        f"Закрыто: {interaction.user} • "
+                        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+                    )
+                )
+                await message.edit(embed=closed_embed, view=None)
+                remaining_ids.remove(applicant_id)
+                cards_closed += 1
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    log_ch = bot.get_channel(LOG_CHANNEL_ID)
+    if log_ch:
+        embed = discord.Embed(
+            title="🗃️ Закрыты активные заявки", color=0x747F8D
+        )
+        embed.add_field(name="Закрыто заявок", value=str(len(pending_ids)), inline=True)
+        embed.add_field(name="Обновлено карточек", value=str(cards_closed), inline=True)
+        embed.add_field(name="Офицер", value=interaction.user.mention, inline=True)
+        await log_ch.send(embed=embed)
+
+    await interaction.followup.send(
+        f"✅ Закрыто заявок: **{len(pending_ids)}**. "
+        f"Обновлено карточек: **{cards_closed}**.",
+        ephemeral=True,
+    )
+
+
+# ───────────────────────────────────────
+#  /bp_reset — полный сброс лиги (офицеры)
+# ───────────────────────────────────────
 @tree.command(name="bp_reset", description="Полный сброс Blood Pact — новый сезон [офицеры]", guild=discord.Object(id=GUILD_ID))
 async def bp_reset(interaction: discord.Interaction):
     if not any(r.id == OFFICER_ROLE_ID for r in interaction.user.roles):
