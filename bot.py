@@ -14,6 +14,7 @@ from storage import (
     set_setting,
     storage_description,
 )
+from loot_system import LootManager, register_loot_commands
 
 # ─────────────────────────────────────────
 #  НАСТРОЙКИ
@@ -25,6 +26,7 @@ OFFICER_ROLE_ID  = int(os.environ.get("OFFICER_ROLE_ID", "0"))
 LOG_CHANNEL_ID   = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 APPLY_CHANNEL_ID  = int(os.environ.get("APPLY_CHANNEL_ID", "0"))
 STATUS_CHANNEL_ID = int(os.environ.get("STATUS_CHANNEL_ID", "0"))  # канал со статусом регистрации
+TRADE_CHANNEL_ID  = int(os.environ.get("TRADE_CHANNEL_ID", "1544351122028896267"))
 STATUS_MESSAGE_ID = None  # ID сообщения статуса, заполняется при старте
 MAX_MEMBERS      = 1000
 REGISTRATION_OPEN = True  # управляется командами /bp_open и /bp_close
@@ -111,6 +113,13 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+loot_manager = LootManager(
+    bot=bot,
+    trade_channel_id=TRADE_CHANNEL_ID,
+    member_role_id=MEMBER_ROLE_ID,
+    officer_role_id=OFFICER_ROLE_ID,
+)
+register_loot_commands(tree, loot_manager, GUILD_ID)
 
 
 # ─────────────────────────────────────────
@@ -1273,10 +1282,12 @@ async def on_ready():
     init_storage()
     REGISTRATION_OPEN = bool(get_setting("registration_open", True))
     bot.add_view(ApproveView())
+    await loot_manager.initialize()
     await tree.sync(guild=discord.Object(id=GUILD_ID))
     print(f"✅ Blood Pact Bot запущен как {bot.user}")
     print(f"   Хранилище: {storage_description()}")
     print(f"   Участников: {active_count(load_data())}/{MAX_MEMBERS}")
+    print(f"   Предметов в каталоге: {len(loot_manager.catalog.items)}")
     await update_status()
 
 bot.run(BOT_TOKEN)
