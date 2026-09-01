@@ -417,10 +417,10 @@ class LootRollView(discord.ui.View):
             details.append(f"ур. {self.item.level}")
         if details:
             embed.add_field(name="Предмет", value=" · ".join(details)[:1024], inline=False)
-        embed.add_field(name="⚔️ Основа", value=self._mentions("main"), inline=False)
-        embed.add_field(name="🛡️ Оффспек", value=self._mentions("off"), inline=False)
+        embed.add_field(name="⚔️ Нужно", value=self._mentions("main"), inline=False)
+        embed.add_field(name="🛡️ Не нужно", value=self._mentions("off"), inline=False)
         embed.add_field(name="Участников", value=str(sum(v != "pass" for v in self.entries.values())), inline=True)
-        embed.set_footer(text="Blood Pact Loot · Основа имеет приоритет")
+        embed.set_footer(text="Blood Pact Loot · «Нужно» имеет приоритет")
         return embed
 
     async def _claim(self, interaction: discord.Interaction, choice: str) -> None:
@@ -437,19 +437,19 @@ class LootRollView(discord.ui.View):
             )
             return
         self.entries[interaction.user.id] = choice
-        labels = {"main": "Основа", "off": "Оффспек", "pass": "Пас"}
+        labels = {"main": "Нужно", "off": "Не нужно", "pass": "Пас"}
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
         await interaction.followup.send(
             f"✅ Ваш выбор: **{labels[choice]}**", ephemeral=True
         )
 
-    @discord.ui.button(label="Основа", emoji="⚔️", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Нужно", emoji="⚔️", style=discord.ButtonStyle.success)
     async def main_roll(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await self._claim(interaction, "main")
 
-    @discord.ui.button(label="Оффспек", emoji="🛡️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Не нужно", emoji="🛡️", style=discord.ButtonStyle.primary)
     async def off_roll(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -487,7 +487,7 @@ class LootRollView(discord.ui.View):
             main_pool = [uid for uid, choice in self.entries.items() if choice == "main"]
             off_pool = [uid for uid, choice in self.entries.items() if choice == "off"]
             pool = main_pool or off_pool
-            priority = "Основа" if main_pool else "Оффспек"
+            priority = "Нужно" if main_pool else "Не нужно"
             result_lines: list[str] = []
             winner: int | None = None
             if pool:
