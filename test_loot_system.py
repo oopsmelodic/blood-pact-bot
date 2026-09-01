@@ -139,11 +139,27 @@ class DiscordLootTests(unittest.IsolatedAsyncioTestCase):
         )
 
         view = LootRollView(manager, LootItem.manual("Test Item"), 1, 60)
-        self.assertEqual(len(view.children), 3)
+        self.assertEqual(len(view.children), 2)
         self.assertEqual(
             [child.label for child in view.children],
-            ["Нужно", "Пас", "Завершить"],
+            ["1", "Завершить"],
         )
+        view.stop()
+        await bot.close()
+
+    async def test_five_items_use_one_embed_and_numbered_roll_buttons(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+        manager = LootManager(bot, 1, 2, 3)
+        items = [LootItem.manual(f"Item {index}") for index in range(1, 6)]
+        view = LootRollView(manager, items, 1, 60)
+
+        embed = view.make_embed()
+        self.assertEqual(len(embed.fields), 5)
+        self.assertEqual(
+            [child.label for child in view.children],
+            ["1", "2", "3", "4", "5", "Завершить"],
+        )
+
         view.stop()
         await bot.close()
 

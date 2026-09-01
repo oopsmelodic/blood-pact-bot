@@ -25,7 +25,7 @@ MAP_URL = "https://parazeya.github.io/hs-map/data/map.json"
 ITEM_SHEET_URL = "https://parazeya.github.io/hs-map/img/items.webp"
 MAX_SCREENSHOT_BYTES = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
-MAX_ITEMS_PER_ROLL = 10
+MAX_ITEMS_PER_ROLL = 5
 
 
 def _cache_path() -> Path:
@@ -447,62 +447,105 @@ class LootRollView(discord.ui.View):
     def __init__(
         self,
         manager: "LootManager",
-        item: LootItem,
+        items: LootItem | Iterable[LootItem],
         creator_id: int,
         duration: int,
         image_url: str = "",
     ):
         super().__init__(timeout=duration)
         self.manager = manager
-        self.item = item
+        self.items = [items] if isinstance(items, LootItem) else list(items)
+        if not self.items:
+            raise ValueError("Для разрола нужен хотя бы один предмет")
+        if len(self.items) > MAX_ITEMS_PER_ROLL:
+            raise ValueError(f"В одном разроле может быть не больше {MAX_ITEMS_PER_ROLL} предметов")
+        # Оставляем атрибут для совместимости с кодом, который создаёт одиночный разрол.
+        self.item = self.items[0]
         self.creator_id = creator_id
         self.duration = duration
         self.image_url = image_url
-        self.entries: dict[int, str] = {}
+        self.entries: dict[int, set[int]] = {
+            index: set() for index in range(len(self.items))
+        }
         self.message: discord.Message | None = None
         self.finished = False
         self._lock = asyncio.Lock()
 
-    def _mentions(self, choice: str) -> str:
-        users = [uid for uid, selected in self.entries.items() if selected == choice]
-        if not users:
-            return "—"
-        shown = " ".join(f"<@{uid}>" for uid in users[:35])
-        if len(users) > 35:
-            shown += f"\n…и ещё {len(users) - 35}"
-        return shown[:1024]
+        for index in range(len(self.items)):
+            button = discord.ui.Button(
+                label=str(index + 1),
+                emoji="🎲",
+                style=discord.ButtonStyle.success,
+                row=0,
+            )
 
-    def make_embed(self, result: str | None = None) -> discord.Embed:
-        color = 0x57F287 if result else 0x5865F2
+            async def roll_callback(
+                interaction: discord.Interaction, item_index: int = index
+            ) -> None:
+                await self._claim(interaction, item_index)
+
+            button.callback = roll_callback
+            self.add_item(button)
+
+        finish_button = discord.ui.Button(
+            label="Завершить",
+            emoji="🔒",
+            style=discord.ButtonStyle.danger,
+            row=1,
+        )
+        finish_button.callback = self._finish_button
+        self.add_item(finish_button)
+
+    @staticmethod
+    def _item_details(item: LootItem) -> str:
+        details = []
+        if item.name_ru and item.name_en != item.name_ru:
+            details.append(f"RU: {item.name_ru}")
+        if item.rarity:
+            details.append(item.rarity)
+        if item.tier:
+            details.append(f"Tier {item.tier}")
+        if item.item_type:
+            details.append(item.item_type)
+        if item.level is not None:
+            details.append(f"ур. {item.level}")
+        return " · ".join(details)
+
+    def make_embed(self, results: list[str] | None = None) -> discord.Embed:
+        color = 0x57F287 if results is not None else 0x5865F2
         embed = discord.Embed(
-            title=f"🎲 Разрол: {self.item.display_name}"[:256],
+            title="🏁 Разрол завершён" if results is not None else "🎲 Разрол предметов",
             description=(
-                result
-                or f"Выберите приоритет. Разрол завершится через **{self.duration} сек.**"
+                "Итоги по каждому предмету:"
+                if results is not None
+                else (
+                    f"Нажмите номер нужного предмета. Можно выбрать несколько. "
+                    f"Разрол завершится через **{self.duration} сек.**"
+                )
             ),
             color=color,
         )
-        details = []
-        if self.item.name_ru and self.item.name_en != self.item.name_ru:
-            details.append(f"RU: {self.item.name_ru}")
-        if self.item.rarity:
-            details.append(self.item.rarity)
-        if self.item.tier:
-            details.append(f"Tier {self.item.tier}")
-        if self.item.item_type:
-            details.append(self.item.item_type)
-        if self.item.level is not None:
-            details.append(f"ур. {self.item.level}")
-        if details:
-            embed.add_field(name="Предмет", value=" · ".join(details)[:1024], inline=False)
-        embed.add_field(name="⚔️ Нужно", value=self._mentions("main"), inline=False)
-        embed.add_field(name="Участников", value=str(sum(v != "pass" for v in self.entries.values())), inline=True)
+        for index, item in enumerate(self.items):
+            details = self._item_details(item)
+            if results is None:
+                value = details or f"Нажмите кнопку **{index + 1}** для участия."
+                if details:
+                    value += f"\nНажмите кнопку **{index + 1}** для участия."
+            else:
+                value = results[index]
+                if details:
+                    value = f"{details}\n{value}"
+            embed.add_field(
+                name=f"{index + 1}. {item.bilingual_name}"[:256],
+                value=value[:1024],
+                inline=False,
+            )
         if self.image_url:
             embed.set_image(url=self.image_url)
         embed.set_footer(text="Blood Pact Loot")
         return embed
 
-    async def _claim(self, interaction: discord.Interaction, choice: str) -> None:
+    async def _claim(self, interaction: discord.Interaction, item_index: int) -> None:
         if self.finished:
             await interaction.response.send_message("Разрол уже завершён.", ephemeral=True)
             return
@@ -515,30 +558,24 @@ class LootRollView(discord.ui.View):
                 "❌ Участвовать могут только участники Blood Pact.", ephemeral=True
             )
             return
-        self.entries[interaction.user.id] = choice
-        labels = {"main": "Нужно", "pass": "Пас"}
+        item = self.items[item_index]
+        if interaction.user.id in self.entries[item_index]:
+            await interaction.response.send_message(
+                f"✅ Вы уже участвуете в разроле **№{item_index + 1} — "
+                f"{item.bilingual_name}**.",
+                ephemeral=True,
+            )
+            return
+        self.entries[item_index].add(interaction.user.id)
         # Не перерисовываем публичное сообщение на каждую ставку: участник
         # получает приватное подтверждение, а итог появится после завершения.
         await interaction.response.send_message(
-            f"✅ Ваш выбор: **{labels[choice]}**", ephemeral=True
+            f"🎲 Вы участвуете в разроле **№{item_index + 1} — "
+            f"{item.bilingual_name}**.",
+            ephemeral=True,
         )
 
-    @discord.ui.button(label="Нужно", emoji="⚔️", style=discord.ButtonStyle.success)
-    async def main_roll(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await self._claim(interaction, "main")
-
-    @discord.ui.button(label="Пас", emoji="✖️", style=discord.ButtonStyle.secondary)
-    async def pass_roll(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await self._claim(interaction, "pass")
-
-    @discord.ui.button(label="Завершить", emoji="🔒", style=discord.ButtonStyle.danger)
-    async def finish_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
+    async def _finish_button(self, interaction: discord.Interaction) -> None:
         if not _is_officer(interaction.user, self.manager.officer_role_id):
             await interaction.response.send_message("❌ Только офицеры.", ephemeral=True)
             return
@@ -558,28 +595,31 @@ class LootRollView(discord.ui.View):
             for child in self.children:
                 child.disabled = True
 
-            main_pool = [uid for uid, choice in self.entries.items() if choice == "main"]
-            pool = main_pool
-            result_lines: list[str] = []
-            winner: int | None = None
-            if pool:
+            results: list[str] = []
+            for index in range(len(self.items)):
+                pool = list(self.entries[index])
+                if not pool:
+                    results.append("Никто не участвовал в разроле.")
+                    continue
                 rolls = {uid: secrets.randbelow(100) + 1 for uid in pool}
                 best = max(rolls.values())
                 tied = [uid for uid, value in rolls.items() if value == best]
                 winner = tied[secrets.randbelow(len(tied))]
-                result_lines.append(f"🏆 Победитель: <@{winner}> — **{rolls[winner]}**")
                 roll_text = " · ".join(
                     f"<@{uid}>: {value}"
-                    for uid, value in sorted(rolls.items(), key=lambda pair: pair[1], reverse=True)
+                    for uid, value in sorted(
+                        rolls.items(), key=lambda pair: pair[1], reverse=True
+                    )
                 )
-                result_lines.append(f"Результаты: {roll_text[:700]}")
-            else:
-                result_lines.append("Никто не участвовал в разроле.")
+                results.append(
+                    f"🏆 Победитель: <@{winner}> — **{rolls[winner]}**\n"
+                    f"Результаты: {roll_text[:700]}"
+                )
 
             if self.message:
                 try:
                     await self.message.edit(
-                        embed=self.make_embed("\n".join(result_lines)), view=self
+                        embed=self.make_embed(results), view=self
                     )
                 except (discord.NotFound, discord.Forbidden):
                     pass
@@ -681,7 +721,7 @@ class LootPreviewView(discord.ui.View):
         await interaction.edit_original_response(embed=self.make_embed(), view=self)
         await interaction.followup.send(
             f"✅ Разрол запущен в <#{self.manager.trade_channel_id}>. "
-            f"Предметов в последовательной очереди: **{count}**.",
+            f"Предметов в общем списке: **{count}**.",
             ephemeral=True,
         )
         self.stop()
@@ -795,14 +835,13 @@ class LootManager:
                 channel = await self.bot.fetch_channel(self.trade_channel_id)
             if not isinstance(channel, (discord.TextChannel, discord.Thread)):
                 raise RuntimeError("TRADE_CHANNEL_ID не указывает на текстовый канал")
-            for item in items:
-                view = LootRollView(
-                    self, item, creator_id, duration, image_url=image_url
-                )
-                self.active_roll = view
-                message = await channel.send(embed=view.make_embed(), view=view)
-                view.message = message
-                await view.wait()
+            view = LootRollView(
+                self, items, creator_id, duration, image_url=image_url
+            )
+            self.active_roll = view
+            message = await channel.send(embed=view.make_embed(), view=view)
+            view.message = message
+            await view.wait()
         finally:
             self.active_roll = None
             async with self._roll_lock:
@@ -831,7 +870,7 @@ def register_loot_commands(
 
     @tree.command(
         name="loot_scan",
-        description="Распознать несколько предметов со скриншота [офицеры]",
+        description="Распознать до 5 предметов со скриншота [офицеры]",
         guild=guild,
     )
     @app_commands.describe(
@@ -884,7 +923,7 @@ def register_loot_commands(
         guild=guild,
     )
     @app_commands.describe(
-        items="Названия через запятую или с новой строки (до 10)",
+        items="Названия через запятую или с новой строки (до 5)",
         duration="Время разрола в секундах (15–600)",
     )
     async def loot_manual(
