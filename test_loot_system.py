@@ -102,7 +102,11 @@ class DiscordLootTests(unittest.IsolatedAsyncioTestCase):
         )
 
         view = LootRollView(manager, LootItem.manual("Test Item"), 1, 60)
-        self.assertEqual(len(view.children), 4)
+        self.assertEqual(len(view.children), 3)
+        self.assertEqual(
+            [child.label for child in view.children],
+            ["Нужно", "Пас", "Завершить"],
+        )
         view.stop()
         await bot.close()
 

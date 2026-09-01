@@ -418,9 +418,8 @@ class LootRollView(discord.ui.View):
         if details:
             embed.add_field(name="Предмет", value=" · ".join(details)[:1024], inline=False)
         embed.add_field(name="⚔️ Нужно", value=self._mentions("main"), inline=False)
-        embed.add_field(name="🛡️ Не нужно", value=self._mentions("off"), inline=False)
         embed.add_field(name="Участников", value=str(sum(v != "pass" for v in self.entries.values())), inline=True)
-        embed.set_footer(text="Blood Pact Loot · «Нужно» имеет приоритет")
+        embed.set_footer(text="Blood Pact Loot")
         return embed
 
     async def _claim(self, interaction: discord.Interaction, choice: str) -> None:
@@ -437,7 +436,7 @@ class LootRollView(discord.ui.View):
             )
             return
         self.entries[interaction.user.id] = choice
-        labels = {"main": "Нужно", "off": "Не нужно", "pass": "Пас"}
+        labels = {"main": "Нужно", "pass": "Пас"}
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
         await interaction.followup.send(
             f"✅ Ваш выбор: **{labels[choice]}**", ephemeral=True
@@ -448,12 +447,6 @@ class LootRollView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await self._claim(interaction, "main")
-
-    @discord.ui.button(label="Не нужно", emoji="🛡️", style=discord.ButtonStyle.primary)
-    async def off_roll(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        await self._claim(interaction, "off")
 
     @discord.ui.button(label="Пас", emoji="✖️", style=discord.ButtonStyle.secondary)
     async def pass_roll(
@@ -485,9 +478,7 @@ class LootRollView(discord.ui.View):
                 child.disabled = True
 
             main_pool = [uid for uid, choice in self.entries.items() if choice == "main"]
-            off_pool = [uid for uid, choice in self.entries.items() if choice == "off"]
-            pool = main_pool or off_pool
-            priority = "Нужно" if main_pool else "Не нужно"
+            pool = main_pool
             result_lines: list[str] = []
             winner: int | None = None
             if pool:
@@ -496,7 +487,6 @@ class LootRollView(discord.ui.View):
                 tied = [uid for uid, value in rolls.items() if value == best]
                 winner = tied[secrets.randbelow(len(tied))]
                 result_lines.append(f"🏆 Победитель: <@{winner}> — **{rolls[winner]}**")
-                result_lines.append(f"Приоритет: **{priority}**")
                 roll_text = " · ".join(
                     f"<@{uid}>: {value}"
                     for uid, value in sorted(rolls.items(), key=lambda pair: pair[1], reverse=True)
