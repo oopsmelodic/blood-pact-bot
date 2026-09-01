@@ -450,12 +450,14 @@ class LootRollView(discord.ui.View):
         item: LootItem,
         creator_id: int,
         duration: int,
+        image_url: str = "",
     ):
         super().__init__(timeout=duration)
         self.manager = manager
         self.item = item
         self.creator_id = creator_id
         self.duration = duration
+        self.image_url = image_url
         self.entries: dict[int, str] = {}
         self.message: discord.Message | None = None
         self.finished = False
@@ -495,6 +497,8 @@ class LootRollView(discord.ui.View):
             embed.add_field(name="Предмет", value=" · ".join(details)[:1024], inline=False)
         embed.add_field(name="⚔️ Нужно", value=self._mentions("main"), inline=False)
         embed.add_field(name="Участников", value=str(sum(v != "pass" for v in self.entries.values())), inline=True)
+        if self.image_url:
+            embed.set_image(url=self.image_url)
         embed.set_footer(text="Blood Pact Loot")
         return embed
 
@@ -513,8 +517,9 @@ class LootRollView(discord.ui.View):
             return
         self.entries[interaction.user.id] = choice
         labels = {"main": "Нужно", "pass": "Пас"}
-        await interaction.response.edit_message(embed=self.make_embed(), view=self)
-        await interaction.followup.send(
+        # Не перерисовываем публичное сообщение на каждую ставку: участник
+        # получает приватное подтверждение, а итог появится после завершения.
+        await interaction.response.send_message(
             f"✅ Ваш выбор: **{labels[choice]}**", ephemeral=True
         )
 
@@ -576,11 +581,6 @@ class LootRollView(discord.ui.View):
                     await self.message.edit(
                         embed=self.make_embed("\n".join(result_lines)), view=self
                     )
-                    if winner is not None:
-                        await self.message.reply(
-                            f"🎉 <@{winner}>, вы выиграли **{self.item.bilingual_name}**!",
-                            mention_author=False,
-                        )
                 except (discord.NotFound, discord.Forbidden):
                     pass
 
@@ -619,6 +619,7 @@ class LootPreviewView(discord.ui.View):
         items: list[LootItem],
         duration: int,
         ocr_text: str = "",
+        image_url: str = "",
     ):
         super().__init__(timeout=300)
         self.manager = manager
@@ -626,6 +627,7 @@ class LootPreviewView(discord.ui.View):
         self.items = items
         self.duration = duration
         self.ocr_text = ocr_text
+        self.image_url = image_url
 
     def make_embed(self) -> discord.Embed:
         lines = []
@@ -646,6 +648,8 @@ class LootPreviewView(discord.ui.View):
             value=f"Предметов: **{len(self.items)}** · таймер: **{self.duration} сек.**",
             inline=False,
         )
+        if self.image_url:
+            embed.set_image(url=self.image_url)
         embed.set_footer(text="Проверьте список перед запуском разрола")
         return embed
 
@@ -662,14 +666,22 @@ class LootPreviewView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await interaction.response.defer(ephemeral=True)
+        try:
+            count = await self.manager.publish_rolls(
+                self.items,
+                interaction.user.id,
+                self.duration,
+                image_url=self.image_url,
+            )
+        except RuntimeError as error:
+            await interaction.followup.send(f"❌ {error}", ephemeral=True)
+            return
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(embed=self.make_embed(), view=self)
-        count = await self.manager.publish_rolls(
-            self.items, interaction.user.id, self.duration
-        )
         await interaction.followup.send(
-            f"✅ В <#{self.manager.trade_channel_id}> запущено разролов: **{count}**.",
+            f"✅ Разрол запущен в <#{self.manager.trade_channel_id}>. "
+            f"Предметов в последовательной очереди: **{count}**.",
             ephemeral=True,
         )
         self.stop()
@@ -707,6 +719,9 @@ class LootManager:
         self.catalog = ItemCatalog()
         self._initialized = False
         self._scan_lock = asyncio.Lock()
+        self._roll_lock = asyncio.Lock()
+        self._roll_batch_task: asyncio.Task | None = None
+        self.active_roll: LootRollView | None = None
         self.catalog_error = ""
 
     async def initialize(self) -> None:
@@ -745,20 +760,54 @@ class LootManager:
             return self.catalog.match_ocr_text(text), text
 
     async def publish_rolls(
-        self, items: Iterable[LootItem], creator_id: int, duration: int
+        self,
+        items: Iterable[LootItem],
+        creator_id: int,
+        duration: int,
+        image_url: str = "",
     ) -> int:
-        channel = self.bot.get_channel(self.trade_channel_id)
-        if channel is None:
-            channel = await self.bot.fetch_channel(self.trade_channel_id)
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            raise RuntimeError("TRADE_CHANNEL_ID не указывает на текстовый канал")
-        count = 0
-        for item in items:
-            view = LootRollView(self, item, creator_id, duration)
-            message = await channel.send(embed=view.make_embed(), view=view)
-            view.message = message
-            count += 1
-        return count
+        queued_items = list(items)
+        if not queued_items:
+            return 0
+        async with self._roll_lock:
+            if self._roll_batch_task and not self._roll_batch_task.done():
+                raise RuntimeError(
+                    "Уже идёт другой разрол. Дождитесь его полного завершения."
+                )
+            self._roll_batch_task = asyncio.create_task(
+                self._run_roll_batch(
+                    queued_items, creator_id, duration, image_url=image_url
+                )
+            )
+        return len(queued_items)
+
+    async def _run_roll_batch(
+        self,
+        items: list[LootItem],
+        creator_id: int,
+        duration: int,
+        image_url: str = "",
+    ) -> None:
+        """Публикует предметы по одному, не допуская параллельных разролов."""
+        try:
+            channel = self.bot.get_channel(self.trade_channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(self.trade_channel_id)
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                raise RuntimeError("TRADE_CHANNEL_ID не указывает на текстовый канал")
+            for item in items:
+                view = LootRollView(
+                    self, item, creator_id, duration, image_url=image_url
+                )
+                self.active_roll = view
+                message = await channel.send(embed=view.make_embed(), view=view)
+                view.message = message
+                await view.wait()
+        finally:
+            self.active_roll = None
+            async with self._roll_lock:
+                if self._roll_batch_task is asyncio.current_task():
+                    self._roll_batch_task = None
 
 
 def register_loot_commands(
@@ -818,7 +867,12 @@ def register_loot_commands(
             )
             return
         view = LootPreviewView(
-            manager, interaction.user.id, items, int(duration), text
+            manager,
+            interaction.user.id,
+            items,
+            int(duration),
+            text,
+            image_url=screenshot.url,
         )
         await interaction.followup.send(
             embed=view.make_embed(), view=view, ephemeral=True

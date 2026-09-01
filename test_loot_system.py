@@ -1,3 +1,4 @@
+import asyncio
 import io
 import tempfile
 import unittest
@@ -144,6 +145,32 @@ class DiscordLootTests(unittest.IsolatedAsyncioTestCase):
             ["Нужно", "Пас", "Завершить"],
         )
         view.stop()
+        await bot.close()
+
+    async def test_roll_embed_contains_uploaded_screenshot(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+        manager = LootManager(bot, 1, 2, 3)
+        image_url = "https://cdn.discordapp.com/attachments/example/loot.png"
+        view = LootRollView(
+            manager, LootItem.manual("Test Item"), 1, 60, image_url=image_url
+        )
+
+        self.assertEqual(view.make_embed().image.url, image_url)
+
+        view.stop()
+        await bot.close()
+
+    async def test_only_one_roll_batch_can_be_active(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+        manager = LootManager(bot, 1, 2, 3)
+        blocker = asyncio.Event()
+        manager._roll_batch_task = asyncio.create_task(blocker.wait())
+
+        with self.assertRaisesRegex(RuntimeError, "Уже идёт другой разрол"):
+            await manager.publish_rolls([LootItem.manual("Second Item")], 1, 60)
+
+        blocker.set()
+        await manager._roll_batch_task
         await bot.close()
 
 
