@@ -1,9 +1,15 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
 import discord
+import numpy as np
+from PIL import Image
 from discord.ext import commands
+
+from icon_recognition import ItemIconMatcher
 
 from loot_system import (
     ItemCatalog,
@@ -72,6 +78,12 @@ class ItemCatalogTests(unittest.TestCase):
         self.assertIn("helmet_colossal_avenger", ids)
         self.assertIn("helmet_harlequin_crest", ids)
 
+    def test_ocr_ui_noise_does_not_invent_items(self):
+        self.assertEqual(
+            self.catalog.match_ocr_text("III O0 |||\nSSS 90 FPS\nInventory"),
+            [],
+        )
+
     def test_parse_helper_item_table(self):
         payload = """
         <table><tr><th>Id</th><th>En</th><th>Type</th><th>Game ID</th><th>Weapon Type</th></tr>
@@ -81,6 +93,30 @@ class ItemCatalogTests(unittest.TestCase):
         parsed = parse_helper_item_table(payload)
         self.assertEqual(parsed["helmet_colossal_avenger"]["game_id"], 1)
         self.assertEqual(parsed["helmet_colossal_avenger"]["game_type"], 0)
+
+    def test_icon_matcher_keeps_two_copies_of_the_same_item(self):
+        atlas = np.zeros((32, 32, 4), dtype=np.uint8)
+        atlas[:8, :8, :3] = (40, 120, 230)
+        atlas[:8, :8, 3] = 255
+        atlas[1:7:2, :, :3] = (220, 60, 30)
+        atlas_path = Path(self.temporary.name) / "icons.webp"
+        cv2.imwrite(str(atlas_path), atlas)
+
+        # Four repeated grid lines establish the native 2x UI scale.
+        screenshot = np.full((256, 256, 3), (6, 6, 15), dtype=np.uint8)
+        for coordinate in (0, 64, 128, 192, 255):
+            screenshot[:, max(0, coordinate - 1):coordinate + 1] = (25, 17, 18)
+            screenshot[max(0, coordinate - 1):coordinate + 1, :] = (25, 17, 18)
+        reference = cv2.resize(atlas[:8, :8, :3], (16, 16), interpolation=cv2.INTER_NEAREST)
+        # OpenCV stores BGR while the PNG encoder below receives RGB.
+        screenshot[24:40, 24:40] = reference
+        screenshot[88:104, 24:40] = reference
+        buffer = io.BytesIO()
+        Image.fromarray(cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)).save(buffer, "PNG")
+
+        item = LootItem(item_id="two_copies", name_en="Two Copies", icon=(0, 0, 8, 8))
+        matches = ItemIconMatcher(atlas_path, [item]).match(buffer.getvalue())
+        self.assertEqual([match.item.item_id for match in matches], ["two_copies", "two_copies"])
 
 
 class DiscordLootTests(unittest.IsolatedAsyncioTestCase):

@@ -15,10 +15,14 @@ from discord import app_commands
 from discord.ext import commands
 from rapidfuzz import fuzz, process
 
+from icon_recognition import ItemIconMatcher
+
 
 CODEX_URL = "https://parazeya.github.io/hs-map/data/codex.json"
 CODEX_RU_URL = "https://parazeya.github.io/hs-map/data/codex.ru.json"
 HELPER_ITEMLIST_URL = "https://hero-siege-helper.vercel.app/data/itemlist"
+MAP_URL = "https://parazeya.github.io/hs-map/data/map.json"
+ITEM_SHEET_URL = "https://parazeya.github.io/hs-map/img/items.webp"
 MAX_SCREENSHOT_BYTES = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 24_000_000
 MAX_ITEMS_PER_ROLL = 10
@@ -49,6 +53,7 @@ class LootItem:
     game_type: int | None = None
     game_id: int | None = None
     weapon_type: int | None = None
+    icon: tuple[int, int, int, int] | list[int] | None = None
     confidence: int = 100
 
     @property
@@ -134,6 +139,13 @@ class ItemCatalog:
         self.items: list[LootItem] = []
         self._aliases: list[str] = []
         self._alias_item_indexes: list[int] = []
+        self.icon_sheet_path = self.cache_path.with_name("hero_siege_item_icons.webp")
+        self.icon_matcher: ItemIconMatcher | None = None
+
+    def _build_icon_matcher(self) -> None:
+        self.icon_matcher = None
+        if self.icon_sheet_path.exists() and any(item.icon for item in self.items):
+            self.icon_matcher = ItemIconMatcher(self.icon_sheet_path, self.items)
 
     def _build_index(self) -> None:
         self._aliases = []
@@ -155,6 +167,7 @@ class ItemCatalog:
             payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
             self.items = [LootItem(**entry) for entry in payload.get("items", [])]
             self._build_index()
+            self._build_icon_matcher()
             return bool(self.items)
         except (OSError, ValueError, TypeError):
             return False
@@ -177,11 +190,41 @@ class ItemCatalog:
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                 # Codex остаётся полноценным источником, если Helper временно недоступен.
                 pass
+            map_data: dict = {}
+            icon_sheet_bytes: bytes | None = None
+            try:
+                async with session.get(MAP_URL) as response:
+                    response.raise_for_status()
+                    map_data = await response.json(content_type=None)
+                async with session.get(ITEM_SHEET_URL) as response:
+                    response.raise_for_status()
+                    icon_sheet_bytes = await response.read()
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                # Названия и ручной режим продолжают работать без атласа.
+                pass
 
         base_items = base.get("items", {})
         ru_items = ru.get("items", {})
         if not isinstance(base_items, dict) or not base_items:
             raise ValueError("Каталог Hero Siege не содержит предметов")
+
+        map_icons: dict[str, tuple[int, int, int, int]] = {}
+        raw_map_items = map_data.get("items", {}) if isinstance(map_data, dict) else {}
+        if isinstance(raw_map_items, dict):
+            for fallback_name, raw_map_item in raw_map_items.items():
+                if not isinstance(raw_map_item, dict):
+                    continue
+                names = raw_map_item.get("names") or {}
+                english = names.get("en", "") if isinstance(names, dict) else ""
+                icon = raw_map_item.get("icon")
+                if not english:
+                    english = fallback_name
+                if (
+                    isinstance(icon, list)
+                    and len(icon) == 4
+                    and all(isinstance(value, int) for value in icon)
+                ):
+                    map_icons[normalize_name(str(english))] = tuple(icon)
 
         items: list[LootItem] = []
         for item_id, raw in base_items.items():
@@ -203,6 +246,7 @@ class ItemCatalog:
                     tier=str(raw.get("tier") or ""),
                     item_type=str(raw.get("type") or ""),
                     level=int(level) if isinstance(level, (int, float)) else None,
+                    icon=map_icons.get(normalize_name(str(name_en or name_ru))),
                 )
             )
 
@@ -225,13 +269,20 @@ class ItemCatalog:
                         game_type=helper["game_type"],
                         game_id=helper["game_id"],
                         weapon_type=helper["weapon_type"],
+                        icon=map_icons.get(normalize_name(helper["name_en"])),
                     )
                 )
 
         self.items = items
         self._build_index()
         payload = {
-            "sources": [CODEX_URL, CODEX_RU_URL, HELPER_ITEMLIST_URL],
+            "sources": [
+                CODEX_URL,
+                CODEX_RU_URL,
+                HELPER_ITEMLIST_URL,
+                MAP_URL,
+                ITEM_SHEET_URL,
+            ],
             "items": [asdict(item) for item in self.items],
         }
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,13 +292,33 @@ class ItemCatalog:
             encoding="utf-8",
         )
         temporary.replace(self.cache_path)
+        if icon_sheet_bytes:
+            try:
+                from PIL import Image
+
+                expected = map_data.get("sheet", {}) if isinstance(map_data, dict) else {}
+                with Image.open(io.BytesIO(icon_sheet_bytes)) as icon_sheet:
+                    actual_size = icon_sheet.size
+                expected_size = (expected.get("w"), expected.get("h"))
+                if actual_size == expected_size:
+                    icon_temporary = self.icon_sheet_path.with_suffix(".tmp")
+                    icon_temporary.write_bytes(icon_sheet_bytes)
+                    icon_temporary.replace(self.icon_sheet_path)
+            except (OSError, ValueError, TypeError):
+                pass
+        self._build_icon_matcher()
         return len(self.items)
 
-    def _best_match(self, text: str, threshold: int) -> LootItem | None:
+    def match_icon_image(self, image_bytes: bytes, limit: int = MAX_ITEMS_PER_ROLL):
+        if self.icon_matcher is None:
+            return []
+        return self.icon_matcher.match(image_bytes, limit)
+
+    def _best_match(self, text: str, threshold: int, scorer=fuzz.WRatio) -> LootItem | None:
         normalized = normalize_name(text)
         if len(normalized) < 3 or not self._aliases:
             return None
-        result = process.extractOne(normalized, self._aliases, scorer=fuzz.WRatio)
+        result = process.extractOne(normalized, self._aliases, scorer=scorer)
         if not result or result[1] < threshold:
             return None
         alias_index = int(result[2])
@@ -265,7 +336,12 @@ class ItemCatalog:
 
         matches: dict[str, LootItem] = {}
         for candidate in candidates:
-            item = self._best_match(candidate, threshold=73)
+            if not re.search(r"[a-zа-я]{3}", candidate, flags=re.IGNORECASE):
+                continue
+            # OCR must resemble the complete item name. WRatio rewards a short
+            # accidental substring inside UI noise and caused confident,
+            # invented items on screenshots containing icons but no text.
+            item = self._best_match(candidate, threshold=82, scorer=fuzz.ratio)
             if item and (
                 item.item_id not in matches
                 or item.confidence > matches[item.item_id].confidence
@@ -630,6 +706,7 @@ class LootManager:
         self.officer_role_id = officer_role_id
         self.catalog = ItemCatalog()
         self._initialized = False
+        self._scan_lock = asyncio.Lock()
         self.catalog_error = ""
 
     async def initialize(self) -> None:
@@ -647,8 +724,25 @@ class LootManager:
     async def scan(self, image_bytes: bytes) -> tuple[list[LootItem], str]:
         if len(image_bytes) > MAX_SCREENSHOT_BYTES:
             raise ValueError("Скриншот больше 15 МБ")
-        text = await asyncio.to_thread(extract_text_from_image, image_bytes)
-        return self.catalog.match_ocr_text(text), text
+        # OpenCV matching is CPU-heavy on a small Railway instance. Serialising
+        # scans keeps two simultaneous uploads from starving the Discord loop.
+        async with self._scan_lock:
+            icon_matches = await asyncio.to_thread(
+                self.catalog.match_icon_image, image_bytes, MAX_ITEMS_PER_ROLL
+            )
+            if icon_matches:
+                items = [
+                    LootItem(
+                        **{
+                            **asdict(match.item),
+                            "confidence": match.confidence,
+                        }
+                    )
+                    for match in icon_matches
+                ]
+                return items, "Предметы распознаны по игровым иконкам."
+            text = await asyncio.to_thread(extract_text_from_image, image_bytes)
+            return self.catalog.match_ocr_text(text), text
 
     async def publish_rolls(
         self, items: Iterable[LootItem], creator_id: int, duration: int
@@ -692,7 +786,7 @@ def register_loot_commands(
         guild=guild,
     )
     @app_commands.describe(
-        screenshot="Скриншот с названиями предметов",
+        screenshot="Скриншот инвентаря или видимых названий предметов",
         duration="Время разрола в секундах (15–600)",
     )
     async def loot_scan(
@@ -712,7 +806,7 @@ def register_loot_commands(
             image_bytes = await screenshot.read()
             items, text = await manager.scan(image_bytes)
         except (ValueError, RuntimeError, discord.HTTPException) as error:
-            await interaction.followup.send(f"❌ OCR: {error}", ephemeral=True)
+            await interaction.followup.send(f"❌ Распознавание: {error}", ephemeral=True)
             return
         if not items:
             excerpt = text.strip()[:1200] or "текст не распознан"
